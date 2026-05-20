@@ -1,0 +1,7 @@
+*.exe
+*.obj
+*.o
+*.log
+~$*.docx
+lost-found-system/logs/
+render-*/
