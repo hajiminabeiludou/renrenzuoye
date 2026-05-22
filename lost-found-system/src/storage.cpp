@@ -121,11 +121,11 @@ bool loadAll(AppState &state) {
     state.categories.clear();
     state.currentUserId = NO_CURRENT_USER;
 
-    loadUsers(state);
-    loadCategories(state);
-    loadItems(state);
-    loadClaims(state);
-    return true;
+    bool usersLoaded = loadUsers(state);
+    bool categoriesLoaded = loadCategories(state);
+    bool itemsLoaded = loadItems(state);
+    bool claimsLoaded = loadClaims(state);
+    return usersLoaded && categoriesLoaded && itemsLoaded && claimsLoaded;
 }
 
 static bool saveUsers(const AppState &state) {
@@ -177,13 +177,16 @@ static bool saveClaims(const AppState &state) {
 }
 
 bool saveAll(const AppState &state) {
-    ensure_directory("data");
-    ensure_directory("logs");
+    if (!ensure_directory("data") || !ensure_directory("logs")) {
+        return false;
+    }
     return saveUsers(state) && saveCategories(state) && saveItems(state) && saveClaims(state);
 }
 
 void seedIfEmpty(AppState &state) {
-    if (!state.users.empty()) return;
+    bool hasAnyData = !state.users.empty() || !state.categories.empty() ||
+                      !state.items.empty() || !state.claims.empty();
+    if (hasAnyData) return;
 
     User admin;
     admin.id = 1;

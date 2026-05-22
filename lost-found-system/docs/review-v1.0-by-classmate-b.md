@@ -1,10 +1,10 @@
 # v1.0 数据模型审核记录
 
-审核人：同学B
+审核人：丁文韬
 
-被审核版本：`v1.0-original-model`
+被审核版本：`v1.0-original`
 
-修改版本：`v1.0-reviewed-model`
+修改版本：`v1.0-fixed`
 
 ## 审核意见
 
