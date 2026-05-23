@@ -1,6 +1,7 @@
 #include "../include/app.h"
 #include "../include/file_io.h"
 #include <windows.h>
+#include <cstdio>
 #include <sstream>
 #include <ctime>
 #include <string>
@@ -169,6 +170,15 @@ static void logAction(const std::string &text) {
     append_line("logs/operation.log", text.c_str());
 }
 
+static bool saveWithMessage(HWND hwnd, const std::string &successText) {
+    if (saveAll(g_state)) {
+        showMessage(hwnd, successText, "失物招领系统", MB_OK | MB_ICONINFORMATION);
+        return true;
+    }
+    showMessage(hwnd, "保存失败，请检查 data 目录权限或文件占用情况。", "失物招领系统", MB_OK | MB_ICONERROR);
+    return false;
+}
+
 static User *currentUser() {
     for (size_t i = 0; i < g_state.users.size(); ++i) {
         if (g_state.users[i].id == g_state.currentUserId) return &g_state.users[i];
@@ -237,20 +247,20 @@ static bool usernameExists(const std::string &username) {
 }
 
 static std::string itemStatusText(int status) {
-    if (status == 0) return "待认领";
-    if (status == 1) return "处理中";
+    if (status == ITEM_OPEN) return "待认领";
+    if (status == ITEM_PROCESSING) return "处理中";
     return "已完成";
 }
 
 static std::string claimStatusText(int status) {
-    if (status == 0) return "待审核";
-    if (status == 1) return "已通过";
+    if (status == CLAIM_PENDING) return "待审核";
+    if (status == CLAIM_APPROVED) return "已通过";
     return "已驳回";
 }
 
 static std::string itemLine(const Item &item) {
     std::stringstream ss;
-    ss << "#" << item.id << "  " << (item.type == 0 ? "失物" : "招领")
+    ss << "#" << item.id << "  " << (item.type == ITEM_LOST ? "失物" : "招领")
        << "  " << item.title << "  [" << itemStatusText(item.status) << "]";
     return ss.str();
 }
@@ -278,7 +288,7 @@ static int selectedAdminClaimId() {
 
 static int selectedCategoryId() {
     int index = (int)SendMessageW(g_sCategory, CB_GETCURSEL, 0, 0);
-    if (index == CB_ERR || g_state.categories.empty()) return 1;
+    if (index == CB_ERR || g_state.categories.empty()) return 0;
     return (int)SendMessageW(g_sCategory, CB_GETITEMDATA, index, 0);
 }
 
@@ -297,8 +307,8 @@ static void updateAdminStatus() {
 static void showStats(HWND hwnd) {
     int open = 0, processing = 0, finished = 0;
     for (size_t i = 0; i < g_state.items.size(); ++i) {
-        if (g_state.items[i].status == 0) ++open;
-        else if (g_state.items[i].status == 1) ++processing;
+        if (g_state.items[i].status == ITEM_OPEN) ++open;
+        else if (g_state.items[i].status == ITEM_PROCESSING) ++processing;
         else ++finished;
     }
     std::stringstream ss;
@@ -317,7 +327,7 @@ static void studentShowDetails(int itemId) {
     }
     std::stringstream ss;
     ss << "物品编号 #" << item->id << "\r\n";
-    ss << "类型：" << (item->type == 0 ? "失物" : "招领") << "\r\n";
+    ss << "类型：" << (item->type == ITEM_LOST ? "失物" : "招领") << "\r\n";
     ss << "标题：" << item->title << "\r\n";
     ss << "分类：" << categoryName(item->categoryId) << "\r\n";
     ss << "发布人：" << userName(item->publisherId) << "\r\n";
@@ -378,7 +388,7 @@ static void adminRefreshClaims() {
     SendMessageW(g_aClaimList, LB_RESETCONTENT, 0, 0);
     for (size_t i = 0; i < g_state.claims.size(); ++i) {
         Claim &claim = g_state.claims[i];
-        if (claim.status != 0) continue;
+        if (claim.status != CLAIM_PENDING) continue;
         std::string line = claimLine(claim);
         std::wstring wide = utf8ToWide(line);
         int pos = (int)SendMessageW(g_aClaimList, LB_ADDSTRING, 0, (LPARAM)wide.c_str());
@@ -387,7 +397,7 @@ static void adminRefreshClaims() {
 }
 
 static void returnToAuth() {
-    g_state.currentUserId = -1;
+    g_state.currentUserId = NO_CURRENT_USER;
     saveAll(g_state);
     if (g_studentWnd) ShowWindow(g_studentWnd, SW_HIDE);
     if (g_adminWnd) ShowWindow(g_adminWnd, SW_HIDE);
@@ -428,13 +438,18 @@ static void showAdminWindow() {
 static void doLogin(HWND hwnd) {
     std::string username = getText(g_loginUser);
     std::string password = getText(g_loginPass);
+    if (username.empty() || password.empty()) {
+        setText(g_authHint, "账号和密码不能为空。");
+        showMessage(hwnd, "账号和密码不能为空。", "失物招领系统", MB_OK | MB_ICONWARNING);
+        return;
+    }
     for (size_t i = 0; i < g_state.users.size(); ++i) {
         User &u = g_state.users[i];
-        if (u.username == username && u.password == password && u.status == 1) {
+        if (u.username == username && u.password == password && u.status == USER_ENABLED) {
             g_state.currentUserId = u.id;
             logAction(nowText() + " gui login " + username);
             setText(g_authHint, "登录成功。");
-            if (u.role == 1) showAdminWindow();
+            if (u.role == ROLE_ADMIN) showAdminWindow();
             else showStudentWindow();
             return;
         }
@@ -462,10 +477,13 @@ static void doRegister(HWND hwnd) {
     u.password = password;
     u.realName = realName;
     u.phone = phone;
-    u.role = 0;
-    u.status = 1;
+    u.role = ROLE_STUDENT;
+    u.status = USER_ENABLED;
     g_state.users.push_back(u);
-    saveAll(g_state);
+    if (!saveAll(g_state)) {
+        showMessage(hwnd, "注册信息保存失败，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONERROR);
+        return;
+    }
     logAction(nowText() + " gui register " + username);
     setText(g_loginUser, username);
     setText(g_loginPass, password);
@@ -475,29 +493,36 @@ static void doRegister(HWND hwnd) {
 
 static void publishItem(HWND hwnd) {
     User *u = currentUser();
-    if (!u || u->role != 0) {
+    if (!u || u->role != ROLE_STUDENT) {
         showMessage(hwnd, "只有学生端可以发布失物招领。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
     std::string title = getText(g_sTitle);
     std::string location = getText(g_sLocation);
     std::string desc = getText(g_sDesc);
-    if (title.empty() || location.empty()) {
-        showMessage(hwnd, "标题和地点不能为空。", "失物招领系统", MB_OK | MB_ICONWARNING);
+    if (title.empty() || location.empty() || desc.empty()) {
+        showMessage(hwnd, "标题、地点和描述不能为空。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
     Item item;
     item.id = nextItemId();
     item.type = (int)SendMessageW(g_sType, CB_GETCURSEL, 0, 0);
-    if (item.type < 0) item.type = 0;
+    if (item.type < 0) item.type = ITEM_LOST;
     item.categoryId = selectedCategoryId();
+    if (item.categoryId <= 0) {
+        showMessage(hwnd, "请选择有效分类。", "失物招领系统", MB_OK | MB_ICONWARNING);
+        return;
+    }
     item.publisherId = u->id;
     item.title = title;
     item.location = location;
-    item.description = desc.empty() ? "暂无描述" : desc;
-    item.status = 0;
+    item.description = desc;
+    item.status = ITEM_OPEN;
     g_state.items.push_back(item);
-    saveAll(g_state);
+    if (!saveAll(g_state)) {
+        showMessage(hwnd, "发布信息保存失败，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONERROR);
+        return;
+    }
     logAction(nowText() + " gui publish " + title);
     setText(g_sTitle, "");
     setText(g_sLocation, "");
@@ -509,14 +534,14 @@ static void publishItem(HWND hwnd) {
 static bool duplicateClaim(int itemId, int userId) {
     for (size_t i = 0; i < g_state.claims.size(); ++i) {
         Claim &c = g_state.claims[i];
-        if (c.itemId == itemId && c.applicantId == userId && c.status != 2) return true;
+        if (c.itemId == itemId && c.applicantId == userId && c.status != CLAIM_REJECTED) return true;
     }
     return false;
 }
 
 static void submitClaim(HWND hwnd) {
     User *u = currentUser();
-    if (!u || u->role != 0) {
+    if (!u || u->role != ROLE_STUDENT) {
         showMessage(hwnd, "只有学生端可以提交认领申请。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -530,7 +555,7 @@ static void submitClaim(HWND hwnd) {
         showMessage(hwnd, "不能认领自己发布的物品。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
-    if (item->status == 2) {
+    if (item->status == ITEM_FINISHED) {
         showMessage(hwnd, "这个物品已经处理完成。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -543,13 +568,19 @@ static void submitClaim(HWND hwnd) {
     c.itemId = item->id;
     c.applicantId = u->id;
     c.reason = getText(g_sReason);
-    if (c.reason.empty()) c.reason = "学生通过界面提交认领";
-    c.status = 0;
+    if (c.reason.empty()) {
+        showMessage(hwnd, "认领理由不能为空。", "失物招领系统", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    c.status = CLAIM_PENDING;
     c.auditTime = "-";
     c.auditRemark = "-";
     g_state.claims.push_back(c);
-    item->status = 1;
-    saveAll(g_state);
+    item->status = ITEM_PROCESSING;
+    if (!saveAll(g_state)) {
+        showMessage(hwnd, "认领申请保存失败，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONERROR);
+        return;
+    }
     studentRefreshItems();
     studentShowDetails(item->id);
     setText(g_sReason, "");
@@ -558,22 +589,25 @@ static void submitClaim(HWND hwnd) {
 
 static void reviewClaim(HWND hwnd, int approve) {
     User *u = currentUser();
-    if (!u || u->role != 1) {
+    if (!u || u->role != ROLE_ADMIN) {
         showMessage(hwnd, "只有管理员可以审核申请。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
     int claimId = selectedAdminClaimId();
     Claim *claim = findClaim(claimId);
-    if (!claim || claim->status != 0) {
+    if (!claim || claim->status != CLAIM_PENDING) {
         showMessage(hwnd, "请先选择一条待审核申请。", "失物招领系统", MB_OK | MB_ICONWARNING);
         return;
     }
-    claim->status = approve ? 1 : 2;
+    claim->status = approve ? CLAIM_APPROVED : CLAIM_REJECTED;
     claim->auditTime = nowText();
     claim->auditRemark = approve ? "管理员审核通过" : "管理员审核驳回";
     Item *item = findItem(claim->itemId);
-    if (item) item->status = approve ? 2 : 0;
-    saveAll(g_state);
+    if (item) item->status = approve ? ITEM_FINISHED : ITEM_OPEN;
+    if (!saveAll(g_state)) {
+        showMessage(hwnd, "审核结果保存失败，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONERROR);
+        return;
+    }
     adminRefreshClaims();
     setText(g_aDetail, "");
     showMessage(hwnd, approve ? "已通过该认领申请。" : "已驳回该认领申请。", "失物招领系统", MB_OK | MB_ICONINFORMATION);
@@ -618,7 +652,7 @@ static LRESULT CALLBACK AuthWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         else if (LOWORD(wParam) == ID_REG_BTN) doRegister(hwnd);
         return 0;
     case WM_CLOSE:
-        saveAll(g_state);
+        saveWithMessage(hwnd, "数据已保存。");
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
@@ -693,7 +727,7 @@ static LRESULT CALLBACK StudentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_S_LOGOUT) returnToAuth();
-        else if (LOWORD(wParam) == ID_S_SAVE) { saveAll(g_state); showMessage(hwnd, "数据已保存。", "失物招领系统", MB_OK); }
+        else if (LOWORD(wParam) == ID_S_SAVE) { saveWithMessage(hwnd, "数据已保存。"); }
         else if (LOWORD(wParam) == ID_S_STATS) showStats(hwnd);
         else if (LOWORD(wParam) == ID_S_PUBLISH) publishItem(hwnd);
         else if (LOWORD(wParam) == ID_S_SEARCH) studentRefreshItems();
@@ -736,7 +770,7 @@ static LRESULT CALLBACK AdminWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_A_LOGOUT) returnToAuth();
-        else if (LOWORD(wParam) == ID_A_SAVE) { saveAll(g_state); showMessage(hwnd, "数据已保存。", "失物招领系统", MB_OK); }
+        else if (LOWORD(wParam) == ID_A_SAVE) { saveWithMessage(hwnd, "数据已保存。"); }
         else if (LOWORD(wParam) == ID_A_STATS) showStats(hwnd);
         else if (LOWORD(wParam) == ID_A_REFRESH) adminRefreshClaims();
         else if (LOWORD(wParam) == ID_A_APPROVE) reviewClaim(hwnd, 1);
@@ -752,12 +786,22 @@ static LRESULT CALLBACK AdminWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     g_inst = hInst;
-    ensure_directory("data");
-    ensure_directory("logs");
-    g_state.currentUserId = -1;
-    loadAll(g_state);
-    seedIfEmpty(g_state);
-    saveAll(g_state);
+    if (!ensure_directory("data") || !ensure_directory("logs")) {
+        showMessage(0, "目录初始化失败，请检查程序所在目录权限。", "失物招领系统", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    g_state.currentUserId = NO_CURRENT_USER;
+    bool loaded = loadAll(g_state);
+    if (g_state.users.empty() && g_state.categories.empty() &&
+        g_state.items.empty() && g_state.claims.empty()) {
+        seedIfEmpty(g_state);
+        if (!saveAll(g_state)) {
+            showMessage(0, "默认数据保存失败，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+    } else if (!loaded) {
+        showMessage(0, "检测到部分数据文件缺失或无法读取，请检查 data 目录。", "失物招领系统", MB_OK | MB_ICONWARNING);
+    }
 
     WNDCLASSW authClass;
     ZeroMemory(&authClass, sizeof(authClass));
